@@ -1,0 +1,168 @@
+---
+title: "National Pediatric Trends - HealthData.gov"
+author: "Meg Hutch"
+date: "1/5/2021"
+output: html_document
+---
+
+
+This script plots National COVID-19 Pediatric Hospitalization Trends using data provided by [HealthData.gov](https://healthdata.gov/dataset/covid-19-reported-patient-impact-and-hospital-capacity-facility)
+
+[Data Dictionary](https://healthdata.gov/covid-19-reported-patient-impact-and-hospital-capacity-facility-data-dictionary)
+
+[HealthData.gov Helpful FAQ Resouce](https://github.com/CareSet/COVID_Hospital_PUF?src=hd)
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(tableone)
+library(kableExtra)
+```    
+
+```{r}
+data <- read.csv('raw_data/reported_hospital_capacity_admissions_facility_level_weekly_average_timeseries_20210103.csv')
+colnames(data)[1] <- gsub('^...','',colnames(data)[1]) # remove unneeded character due to the utf-8 encoding
+```
+
+## **Data Pre-processing**
+
+We will keep only pediatric hospitals of interest.
+
+An important note about data collection according to HealthData.gov:
+
+"For a given entry, the term “collection_week” signifies the start of the period that is aggregated. For example, a “collection_week” of 2020-11-20 means the average/sum/coverage of the elements captured from that given facility starting and including Friday, November 20, 2020, and ending and including reports for Thursday, November 26, 2020.
+
+```{r}
+# is hospital_pk unique for every hospital_name?
+#View(data %>% distinct(hospital_pk, ccn, hospital_name) %>% group_by(hospital_pk) %>% mutate(count = n()))
+
+# it looks like two hospital_names belong to the same hospital_pk and ccn - but I think it should still be fine to group_by hospital_name
+
+data <- data %>%
+  select(hospital_pk, collection_week, state, ccn, hospital_name, 
+          city, zip, hospital_subtype, 
+          total_pediatric_patients_hospitalized_confirmed_and_suspected_covid_7_day_avg,
+          total_pediatric_patients_hospitalized_confirmed_covid_7_day_avg,
+          total_pediatric_patients_hospitalized_confirmed_and_suspected_covid_7_day_sum,
+          total_pediatric_patients_hospitalized_confirmed_covid_7_day_sum,
+          total_pediatric_patients_hospitalized_confirmed_and_suspected_covid_7_day_coverage,
+          total_pediatric_patients_hospitalized_confirmed_covid_7_day_coverage,
+          previous_day_admission_pediatric_covid_confirmed_7_day_sum,
+          previous_day_admission_pediatric_covid_suspected_7_day_sum)
+
+
+data$collection_week <- as.Date(data$collection_week)
+
+# only use dates prior to october 10
+#data <- data %>% filter(collection_week < "2020-10-10")
+```
+
+**Obfuscation**
+
+According to the FAQ "When there are fewer than 4 patients in a data field the cell is redacted and replaced with -999999. This value was chosen to ensure that users would not make the mistake of quickly “averaging” a column to come to a conclusion that does not account for the fact that many of the cells contain too few patients to release (for privacy concerns). To conduct analysis on this data, one must decide how to handle the -999999 fields." 
+
+To stay conservative in the case that 0 counts could be obfuscated, I will treat -999999 as NA.
+
+```{r}
+# indicate missing values
+obfs <- data %>% filter(total_pediatric_patients_hospitalized_confirmed_covid_7_day_sum == -999999)
+
+data[data == -999999] <- NA
+```
+
+
+### Sum Weekly Pediatric Hospitalizations across all hospitals 
+
+Here we will also define new variables: 'n_hospital_week', 'n_state_week', and 'n_hospitals_by_state' which respectively contain the weekly counts of the unique number of hospitals, states, and hospitals per state, contributing pediatric data.
+
+Additionally, in order to count the unique number of hospitals, we will only include hospitals with pediatric data > 0 to prevent counting hospitals that have 0 pediatric patients solely due to the fact that they never admit pediatric patients - this may cause us to not count hospitals that are reporting true 0 pediatric cases. However, the exact number of hospitals is likely not super important for our purposes- just a metric I included as a figure below in case it is helpful to have an idea of the number of hospitals within the dataset
+
+```{r}
+# are any hospitals reported > 1x in the same collection_week - there are because some hospitals have the same name - use ccn if possible
+#View(data %>% select(collection_week, hospital_name, ccn) %>% group_by(collection_week, hospital_name, ccn) %>% mutate(count = n()))
+
+data <- data %>% 
+  group_by(collection_week) %>%
+    filter(total_pediatric_patients_hospitalized_confirmed_covid_7_day_sum > 0) %>%
+  mutate(n_state_week = n_distinct(state),
+         sum_ped_confirmed = sum(total_pediatric_patients_hospitalized_confirmed_covid_7_day_sum, na.rm = TRUE)) %>%
+  ungroup() %>% 
+  group_by(collection_week) %>%
+  mutate(n_hospital_week = n_distinct(ccn, hospital_name)) %>%
+  ungroup() %>%
+  # count unique # hospitals per state
+  group_by(state) %>%
+  mutate(n_hospitals_by_state = n_distinct(ccn, hospital_name)) %>%
+  # counts by hospital subtype
+  ungroup()
+```
+
+
+## **Pediatric Hospitalizations**
+
+### Weekly Confirmed Pediatric Hospitalizations
+
+HealthData.gov data dictionary definition of the variable "total_pediatric_patients_hospitalized_confirmed_covid_7_day_sum": 
+
+"Sum of reports of patients currently hospitalized in a pediatric inpatient bed, including NICU, PICU, newborn, and nursery, who have laboratory-confirmed COVID-19. Including those in observation beds. Including patients who have both laboratory-confirmed COVID-19 and laboratory confirmed influenza in this field reported in the 7-day period."
+
+```{r}
+ggplot(data %>% distinct(collection_week, sum_ped_confirmed),
+       aes(x = collection_week, y = sum_ped_confirmed)) + 
+  geom_line(color = "tomato") + 
+  geom_point(color = "tomato") + 
+  ylab("Pediatric Hospitalizations") + 
+  xlab("Week") + 
+  scale_x_date(date_labels = "%b-%d", date_breaks = "1 month") + 
+  theme_bw()
+```
+
+### Unique number of hospitals contributing data by week
+
+As previously note, there could potentially be more hospitals/states reporting due to my pre-processing and removing hospitals with 0 counts.
+
+```{r}
+ggplot(data %>% 
+         distinct(collection_week, n_hospital_week), 
+       aes(x = collection_week, y = n_hospital_week)) + 
+  geom_histogram(stat = 'identity', fill = "tomato") +
+  ylab("Unique Hospitals Contributing Data") + 
+  xlab("Week") + 
+  scale_x_date(date_labels = "%b-%d") +
+  theme_bw()
+```
+
+### Unique number of states contributing data by week
+
+```{r}
+ggplot(data %>% distinct(collection_week, n_state_week), 
+       aes(x = collection_week, y = n_state_week)) + 
+  geom_histogram(stat = 'identity', fill = "tomato") + 
+  scale_x_date(date_labels = "%b-%d") + 
+  ylab("Unique States Contributing Data") + 
+  xlab("Week") + 
+  theme_bw()
+
+```
+
+### Number of unique hospitals per state (not accounting for week)
+
+```{r}
+data %>% 
+  distinct(state, n_hospitals_by_state) %>% 
+  arrange(desc(n_hospitals_by_state)) %>%
+  kable("html") %>% 
+  kable_styling(bootstrap_options = "striped")
+```
+
+## **Important Notes From HealthData.gov sites**
+
+
+* **Data Collection**: “Each row of data in this file represents the COVID-19 related capacity information for a single hospital facility, over the course of a seven day period. (Friday-Thursday). This data is reported by nearly every hospital to the Federal Government in the US each day. This means that each row of data is based on the aggregated reporting for the previous week.”
+  
+  * **FAQ has pediatric section**: “There is information about pediatric cases and pediatric hospitals included in the dataset. However, there is currently no information about how full pediatric ICUs are in this data release. This is due to a strategic decision in the underlying reporting infrastructure. Generally pediatric data is not reported, given that pediatric infection is relatively rare, and in order to ensure that reporting is as simple as possible for hospitals"
+  
+  
+* **They speak of the reliability of the data** – “The data has been reliable enough to be used in Federal response planning for some time and continues to improve each day. The reporting consistency is high enough now that the data is likely to become reliable enough for broad release to the public for dozens of purposes.”
+  
+  * **Additionally, each weekly refresh of the data will contain revised/updated data:** “So if the data file is released every Monday (for instance) and a specific hospital failed to report on Thursday, but then reports for the Thursday data on Tuesday. Subsequent data releases will include the updated hospital data, which will be slightly different than the data that is initially released. This is a “reporting lag” effect that is common to any complex reporting/surveillance process (the same kind of lag can happen with medical claim databases over time, for instance).”
